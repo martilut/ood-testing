@@ -1,0 +1,11 @@
+dataset:
+  _target_: oodt.data.loaders.SklearnDataset
+  loader_func: "sklearn.datasets.load_iris"
+  name: "Iris Dataset"
+  target_name: "species"
+
+preprocessing:
+  _target_: oodt.data.preprocessing.Preprocessor
+  scaling: "standard"
+  encoding: "onehot"
+  impute_strategy: "mean"
