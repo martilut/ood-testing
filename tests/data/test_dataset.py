@@ -73,14 +73,14 @@ def test_sklearn_dataset_preprocessing():
 
 def test_electricity_dataset():
     # Define the split paths
-    dataset_dir = get_project_path() / Path("datasets/partitions/electricity")
+    dataset_dir = get_project_path() / Path("datasets/partitions/electricity_small")
     paths = {
         "source": dataset_dir / "source.csv",
         "target": dataset_dir / "target.csv",
     }
 
     # Initialize dataset
-    dataset = CSVDataset(path=paths, target_col="class", name="electricity")
+    dataset = CSVDataset(path=paths, target_col="class", name="electricity_small")
     dataset.load()
 
     # Basic checks

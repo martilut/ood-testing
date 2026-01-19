@@ -47,12 +47,32 @@ class BaseShiftStrategy(ABC):
         pass
 
     def get_partition_indices(self, X: pd.DataFrame, y: pd.Series):
-        """
-        Helper: returns a dict mapping partition_id -> indices
-        """
         labels = self.get_partition_labels(X, y)
-        partitions = {pid: labels.index[labels == pid] for pid in range(self.n_partitions)}
+        self._validate_labels(labels)
+
+        partitions = {
+            pid: labels.index[labels == pid]
+            for pid in range(self.n_partitions)
+        }
+
+        empty = [pid for pid, idx in partitions.items() if len(idx) == 0]
+        if empty:
+            raise ValueError(
+                f"{self.name}: empty partitions detected: {empty}. "
+                "This shift strategy requires all partitions to be non-empty."
+            )
+
         return partitions
+
+    def _validate_labels(self, labels: pd.Series):
+        used = set(labels.unique())
+        expected = set(range(self.n_partitions))
+
+        missing = expected - used
+        if missing:
+            raise ValueError(
+                f"{self.name}: partitions {sorted(missing)} are empty."
+            )
 
     def __repr__(self):
         return f"<{self.name} shift strategy, n_partitions={self.n_partitions}>"
