@@ -22,7 +22,7 @@ class Preprocessor:
         # Encode categorical
         cat_cols = X_processed.select_dtypes(include=["object", "category"]).columns
         if len(cat_cols) > 0:
-            self.encoder = OneHotEncoder(sparse=False, handle_unknown='ignore')
+            self.encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
             encoded = self.encoder.fit_transform(X_processed[cat_cols])
             encoded_df = pd.DataFrame(encoded, columns=self.encoder.get_feature_names_out(cat_cols))
             X_processed = X_processed.drop(columns=cat_cols)
