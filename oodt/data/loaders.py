@@ -19,10 +19,6 @@ class CSVDataset(BaseTabularDataset):
         self.target = self.data.pop(self.target_col)
         self.feature_types = {col: str(self.data[col].dtype) for col in self.data.columns}
 
-    def get_splits(self):
-        # By default, return full data. Splitting handled elsewhere (splitters)
-        return self.data.copy(), self.target.copy(), None, None
-
 
 class ParquetDataset(CSVDataset):
     def load(self):
@@ -44,6 +40,3 @@ class SklearnDataset(BaseTabularDataset):
         self.data = pd.DataFrame(dataset.data, columns=dataset.feature_names)
         self.target = pd.Series(dataset.target, name=self.target_name or "target")
         self.feature_types = {col: "numerical" for col in self.data.columns}
-
-    def get_splits(self):
-        return self.data.copy(), self.target.copy(), None, None

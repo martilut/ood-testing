@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Tuple
 
 import pandas as pd
 
@@ -21,13 +20,6 @@ class BaseTabularDataset(ABC):
     def load(self):
         """
         Load data into self.data and self.target
-        """
-        pass
-
-    @abstractmethod
-    def get_splits(self) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
-        """
-        Return train/test splits: X_train, y_train, X_test, y_test
         """
         pass
 
