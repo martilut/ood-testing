@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
 
@@ -7,27 +7,39 @@ from .base import BaseTabularDataset
 
 
 class CSVDataset(BaseTabularDataset):
-    def __init__(self, path: str, target_col: str, name: str = "CSV Dataset"):
+    def __init__(self, path, target_col: str, name="CSV Dataset"):
         super().__init__(name)
-        self.path = Path(path)
+        self.path = path
         self.target_col = target_col
 
     def load(self):
-        self.data = pd.read_csv(self.path)
-        if self.target_col not in self.data.columns:
-            raise ValueError(f"Target column {self.target_col} not found in dataset")
-        self.target = self.data.pop(self.target_col)
-        self.feature_types = {col: str(self.data[col].dtype) for col in self.data.columns}
-
+        if isinstance(self.path, str):
+            df = pd.read_csv(self.path)
+            if self.target_col not in df.columns:
+                raise ValueError(f"Target column {self.target_col} not found in dataset")
+            self.target = df.pop(self.target_col)
+            self.data = df
+            self.feature_types = {col: str(df[col].dtype) for col in df.columns}
+        elif isinstance(self.path, dict):
+            paths = {k: Path(v) for k, v in self.path.items()}
+            self._load_splits(paths, pd.read_csv)
+        else:
+            raise ValueError("path must be str or dict of split_name -> path")
 
 class ParquetDataset(CSVDataset):
     def load(self):
-        self.data = pd.read_parquet(self.path)
-        if self.target_col not in self.data.columns:
-            raise ValueError(f"Target column {self.target_col} not found in dataset")
-        self.target = self.data.pop(self.target_col)
-        self.feature_types = {col: str(self.data[col].dtype) for col in self.data.columns}
-
+        if isinstance(self.path, str):
+            df = pd.read_parquet(self.path)
+            if self.target_col not in df.columns:
+                raise ValueError(f"Target column {self.target_col} not found in dataset")
+            self.target = df.pop(self.target_col)
+            self.data = df
+            self.feature_types = {col: str(df[col].dtype) for col in df.columns}
+        elif isinstance(self.path, dict):
+            paths = {k: Path(v) for k, v in self.path.items()}
+            self._load_splits(paths, pd.read_parquet)
+        else:
+            raise ValueError("path must be str or dict of split_name -> path")
 
 class SklearnDataset(BaseTabularDataset):
     def __init__(self, loader_func, name: str = "Sklearn Dataset", target_name: Optional[str] = None):

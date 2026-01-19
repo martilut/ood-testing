@@ -1,7 +1,12 @@
+from pathlib import Path
+
 import pytest
 from importlib import import_module
 from hydra.utils import instantiate
 import pandas as pd
+
+from oodt.data.loaders import CSVDataset
+from oodt.utils.utils import get_project_path
 
 
 # Helper to convert string to callable
@@ -66,6 +71,32 @@ def test_sklearn_dataset_preprocessing():
     # Number of rows unchanged
     assert X_processed.shape[0] == X.shape[0]
 
+def test_electricity_dataset():
+    # Define the split paths
+    dataset_dir = get_project_path() / Path("datasets/partitions/electricity")
+    paths = {
+        "source": dataset_dir / "source.csv",
+        "target": dataset_dir / "target.csv",
+    }
+
+    # Initialize dataset
+    dataset = CSVDataset(path=paths, target_col="class", name="electricity")
+    dataset.load()
+
+    # Basic checks
+    assert dataset.data is not None, "Data not loaded"
+    assert dataset.target is not None, "Target not loaded"
+    assert dataset.ood_split is not None, "OOD splits not stored"
+
+    # Check that splits are accessible
+    for split_name, split in dataset.ood_split.items():
+        print(f"Split: {split_name}")
+        print(f"  data shape: {split['data'].shape}")
+        print(f"  target shape: {split['target'].shape}")
+        print(f"  target head:\n{split['target'].head()}")
+
+    # Print overall summary
+    dataset.summary()
 
 if __name__ == "__main__":
     pytest.main()

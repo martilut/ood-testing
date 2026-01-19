@@ -1,31 +1,43 @@
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import pandas as pd
 
 
 class BaseTabularDataset(ABC):
-    """
-    Base class for tabular datasets.
-    Supports ID/OOD splitting, train/test splits, and metadata.
-    """
-
     def __init__(self, name: str):
         self.name = name
         self.data: pd.DataFrame = None
         self.target: pd.Series = None
-        self.feature_types: dict = {}  # {"feature_name": "categorical"/"numerical"}
-        self.metadata: dict = {}  # additional info, e.g., n_classes
+        self.target_col: Optional[str] = None
+        self.feature_types: dict = {}
+        self.metadata: dict = {}
+        self.ood_split: Optional[dict] = None
 
     @abstractmethod
     def load(self):
-        """
-        Load data into self.data and self.target
-        """
+        """Load the dataset (single or multiple files)"""
         pass
 
+    def _load_splits(self, paths: dict, reader_func):
+        """Helper to load multiple splits"""
+        self.ood_split = {}
+        for split_name, split_path in paths.items():
+            df = reader_func(split_path)
+            if getattr(self, "target_col", None) not in df.columns:
+                raise ValueError(f"Target column {self.target_col} not found in {split_name} split")
+            y = df.pop(self.target_col)
+            self.ood_split[split_name] = {"data": df, "target": y}
+
+        self.data = pd.concat([v["data"] for v in self.ood_split.values()], ignore_index=True)
+        self.target = pd.concat([v["target"] for v in self.ood_split.values()], ignore_index=True)
+        self.feature_types = {col: str(self.data[col].dtype) for col in self.data.columns}
+
     def summary(self):
+        """Print a summary of the dataset"""
         print(f"Dataset: {self.name}")
-        print(f"Shape: {self.data.shape}")
-        print(f"Features: {self.feature_types}")
-        if self.target is not None:
-            print(f"Target distribution:\n{self.target.value_counts(normalize=True)}")
+        print(f"Number of samples: {len(self.data)}")
+        print(f"Number of features: {self.data.shape[1]}")
+        print(f"Feature types: {self.feature_types}")
+        if self.ood_split:
+            print(f"OOD Splits: {list(self.ood_split.keys())}")
