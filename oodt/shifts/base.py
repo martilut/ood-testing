@@ -46,7 +46,7 @@ class BaseShiftStrategy(ABC):
         """
         pass
 
-    def get_partition_indices(self, X: pd.DataFrame, y: pd.Series):
+    def get_partition_indices(self, X: pd.DataFrame, y: pd.Series) -> dict[int, pd.Index]:
         labels = self.get_partition_labels(X, y)
         self._validate_labels(labels)
 
