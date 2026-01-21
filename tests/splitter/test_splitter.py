@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import pandas as pd
-from oodt.splitter.splitter import TrainTestSplitter
+from oodt.splitting.splitter import TrainTestSplitter
 
 # --- synthetic dataset helper ---
 def create_synthetic_dataset():
