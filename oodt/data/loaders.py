@@ -7,14 +7,16 @@ from .base import BaseTabularDataset
 
 
 class CSVDataset(BaseTabularDataset):
-    def __init__(self, path, target_col: str, name="CSV Dataset"):
+    def __init__(self, path, target_col: str, name="CSV Dataset", has_index: bool = False):
         super().__init__(name)
         self.path = path
         self.target_col = target_col
+        self.has_index = has_index
 
     def load(self):
         if isinstance(self.path, str):
-            df = pd.read_csv(self.path)
+            df = pd.read_csv(self.path, index_col=0 if self.has_index else None)
+            df.reset_index(drop=True, inplace=True)
             if self.target_col not in df.columns:
                 raise ValueError(f"Target column {self.target_col} not found in dataset")
             self.target = df.pop(self.target_col)
@@ -22,7 +24,7 @@ class CSVDataset(BaseTabularDataset):
             self.feature_types = {col: str(df[col].dtype) for col in df.columns}
         elif isinstance(self.path, dict):
             paths = {k: Path(v) for k, v in self.path.items()}
-            self._load_splits(paths, pd.read_csv)
+            self._load_splits(paths, pd.read_csv, {"index_col": 0 if self.has_index else None})
         else:
             raise ValueError("path must be str or dict of split_name -> path")
 
