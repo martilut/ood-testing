@@ -1,63 +1,167 @@
-from __future__ import annotations
 from typing import Optional, List, Union
-import pandas as pd
+
 import numpy as np
-import os
-import time
-from tqdm import tqdm
-from sklearn.preprocessing import normalize
+import pandas as pd
+
 from oodt.shifts.base import BaseShiftStrategy
-from pymfe.mfe import MFE
+from oodt.utils.kmeans import build_metafeature_space, assign_clusters_matrix, update_centroids_matrix, assign_clusters, \
+    update_centroids, stratify_features_with_edges, build_metafeature_space_matrix
 
 
 class MFKMeansShift(BaseShiftStrategy):
     """
-    Shift strategy using local metafeatures and k-means clustering to create partitions.
+    Metafeature KMeans Shift Strategy
+
+    Supports:
+      - vector mode (local neighborhoods)
+      - matrix mode (feature-bin stratification)
+
+    Also supports:
+      - projection of unseen test samples into MF space
+        via project_samples()
     """
 
     def __init__(
         self,
         mf_name: Union[str, List[str]],
         n_partitions: int = 2,
+        n_bins: int = 5,
         percent: float = 0.1,
         summary: Optional[List[str]] = None,
         random_state: Optional[int] = None,
         max_iter: int = 50,
         patience: int = 5,
         verbose: bool = True,
+        mode: str = "vector",      # "vector" or "matrix"
+        metric: str = "frobenius", # matrix distance metric
     ):
         super().__init__(
             name="MFKMeansShift",
             n_partitions=n_partitions,
-            random_state=random_state
+            random_state=random_state,
         )
+
         self.mf_name = mf_name
+        self.n_partitions = n_partitions
+        self.n_bins = n_bins
         self.percent = percent
         self.summary = summary
+
+        self.mode = mode
+        self.metric = metric
+
         self.max_iter = max_iter
         self.patience = patience
         self.verbose = verbose
-        self.centroids: Optional[np.ndarray] = None
 
-    def get_partition_labels(self, X: pd.DataFrame, y: pd.Series) -> pd.Series:
+        # learned centroids
+        self.centroids = None
+        self.expected_len = None
+
+        # training reference data (needed for projection)
+        self.X_ref_ = None
+        self.y_ref_ = None
+
+        # matrix-mode storage
+        self.partition_mf_ = None
+        self.bin_edges_ = None
+
+        # metadata storage
+        self.meta_: dict = {}
+
+    # ============================================================
+    # Metadata accessor
+    # ============================================================
+
+    def get_meta_info(self) -> dict:
+        return self.meta_
+
+    # ============================================================
+    # Fit clustering + return partition labels
+    # ============================================================
+
+    def get_partition_labels(self, X: pd.DataFrame, y: pd.Series):
+
         X_np = X.to_numpy()
         y_np = y.to_numpy()
 
-        # --- build MF space ---
-        mf_space = build_metafeature_space(X_np, y_np, self.mf_name, percent=self.percent, summary=self.summary)
+        # store training reference for later projection
+        self.X_ref_ = X_np
+        self.y_ref_ = y_np
 
-        # --- initialize centroids ---
         rng = np.random.default_rng(self.random_state)
-        self.centroids = mf_space[rng.choice(len(mf_space), self.n_partitions, replace=False)]
 
-        # --- k-means clustering ---
-        labels = np.zeros(len(X), dtype=int)
+        # store config
+        self.meta_ = {
+            "mode": self.mode,
+            "mf_name": self.mf_name,
+            "summary": self.summary,
+            "percent": self.percent,
+            "n_bins": self.n_bins,
+            "metric": self.metric,
+        }
+
+        # =====================================================
+        # Build MF space (train)
+        # =====================================================
+
+        if self.mode == "vector":
+
+            mf_space = build_metafeature_space(
+                X_np, y_np,
+                mf_name=self.mf_name,
+                percent=self.percent,
+                summary=self.summary,
+            )
+
+            init_ids = rng.choice(len(mf_space), self.n_partitions, replace=False)
+            self.centroids = mf_space[init_ids]
+
+            self.meta_["mf_space_train"] = mf_space
+
+        elif self.mode == "matrix":
+
+            mf_space, bins, partitions, bin_edges, expected_len = build_metafeature_space_matrix(
+                X_np, y_np,
+                mf_name=self.mf_name,
+                n_bins=self.n_bins,
+                summary=self.summary,
+            )
+            self.expected_len = expected_len
+
+            init_ids = rng.choice(len(mf_space), self.n_partitions, replace=False)
+            self.centroids = [mf_space[i] for i in init_ids]
+
+            # store bin structure for test projection
+            self.partition_mf_ = partitions
+            self.bin_edges_ = bin_edges
+
+            self.meta_["mf_space_train"] = mf_space
+            self.meta_["bins_train"] = bins
+
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+        # =====================================================
+        # Run KMeans iterations
+        # =====================================================
+
+        labels = np.zeros(len(X_np), dtype=int)
+
         prev_labels = None
         stable_iters = 0
 
         for it in range(self.max_iter):
-            labels = assign_clusters(mf_space, self.centroids)
-            new_centroids = update_centroids(mf_space, labels, self.n_partitions)
+
+            if self.mode == "matrix":
+                labels = assign_clusters_matrix(mf_space, self.centroids, self.metric)
+                new_centroids = update_centroids_matrix(mf_space, labels, self.n_partitions)
+
+            else:
+                labels = assign_clusters(mf_space, self.centroids)
+                new_centroids = update_centroids(mf_space, labels, self.n_partitions)
+
+            # convergence check
             if prev_labels is not None and np.all(prev_labels == labels):
                 stable_iters += 1
                 if stable_iters >= self.patience:
@@ -66,103 +170,67 @@ class MFKMeansShift(BaseShiftStrategy):
                     break
             else:
                 stable_iters = 0
+
             prev_labels = labels.copy()
             self.centroids = new_centroids
 
+        # store results
+        self.meta_["final_labels"] = labels
+        self.meta_["final_centroids"] = self.centroids
+
         return pd.Series(labels, index=X.index)
 
+    # ============================================================
+    # Project unseen samples into MF space
+    # ============================================================
 
-def get_neighborhood_indices(x: np.ndarray, point: np.ndarray, percent: float, exclude_self: bool = True) -> np.ndarray:
-    n = len(x)
-    k_neighbours = max(1, int(n * percent))
-    distances = np.linalg.norm(x - point, axis=1)
-    if exclude_self:
-        self_idx = np.argmin(distances)
-        distances[self_idx] = np.inf
-    sorted_indices = np.argsort(distances)
-    return sorted_indices[:k_neighbours]
+    def project_samples(self, X_new: pd.DataFrame) -> list[np.ndarray]:
+        if self.mode == "vector":
+            # vector mode stays the same
+            return build_metafeature_space(
+                X_new.to_numpy(),
+                np.zeros(len(X_new)),  # dummy target
+                self.mf_name,
+                percent=self.percent,
+                summary=self.summary,
+            )
 
-def _flatten_feature_values(ft_values):
-    parts = []
-    for v in ft_values:
-        if v is None:
-            parts.append(np.array([0.0]))
+        elif self.mode == "matrix":
+            projected = []
+
+            # compute bin indices for new samples
+            bins_array = stratify_features_with_edges(X_new.to_numpy(), self.n_bins)[0]
+
+            for i, sample in enumerate(X_new.to_numpy()):
+                sample_matrix = []
+
+                for f_idx, bin_id in enumerate(bins_array[i]):
+                    partition_mf_ = self.partition_mf_
+
+                    # safe lookup: use nearest available bin if bin_id missing
+                    if bin_id not in partition_mf_[f_idx]:
+                        available_bins = np.array(list(partition_mf_[f_idx].keys()))
+                        if len(available_bins) > 0:
+                            bin_id = available_bins[np.argmin(np.abs(available_bins - bin_id))]
+                        else:
+                            # fallback: no bins at all, use zeros
+                            mf_vec = np.zeros(self.expected_len)
+                            sample_matrix.append(mf_vec)
+                            continue
+
+                    mf_vec = partition_mf_[f_idx][bin_id]
+
+                    # ensure correct length
+                    if len(mf_vec) != self.expected_len:
+                        padded = np.zeros(self.expected_len)
+                        padded[:len(mf_vec)] = mf_vec
+                        mf_vec = padded
+
+                    sample_matrix.append(mf_vec)
+
+                projected.append(np.vstack(sample_matrix))
+
+            return projected
+
         else:
-            if np.isscalar(v):
-                parts.append(np.array([v]))
-            else:
-                arr = np.asarray(v, dtype=float)
-                arr = np.where(np.isnan(arr), 0.0, arr)
-                parts.append(arr)
-    if not parts:
-        return None
-    flat = np.concatenate(parts, axis=0)
-    flat = np.where(np.isfinite(flat), flat, 0.0)
-    return flat
-
-def compute_metafeature(x_sub: np.ndarray, y_sub: np.ndarray, mf_name: Union[str, List[str]], summary: Optional[List[str]] = None) -> np.ndarray:
-    if isinstance(mf_name, str):
-        features = [mf_name]
-    else:
-        features = list(mf_name)
-
-    mfe = MFE(features=features, summary=summary)
-    try:
-        mfe.fit(x_sub, y_sub)
-        _, ft_values = mfe.extract()
-    except Exception:
-        ft_values = None
-
-    if not ft_values:
-        return None
-    return _flatten_feature_values(ft_values)
-
-def build_metafeature_space(x: np.ndarray, y: np.ndarray, mf_name: Union[str, List[str]], percent: float = 0.1, summary: Optional[List[str]] = None) -> np.ndarray:
-    mf_vectors = []
-    placeholder_indices = []
-
-    for idx in tqdm(range(len(x)), desc="Building MF space"):
-        neighbors = get_neighborhood_indices(x, x[idx], percent)
-        mf_vec = compute_metafeature(x[neighbors], y[neighbors], mf_name, summary)
-        if mf_vec is None:
-            mf_vectors.append(None)
-            placeholder_indices.append(idx)
-        else:
-            mf_vectors.append(mf_vec)
-
-    if all(v is None for v in mf_vectors):
-        raise RuntimeError("All metafeature computations failed.")
-
-    first_nonnull = next(v for v in mf_vectors if v is not None)
-    target_dim = first_nonnull.shape[0]
-
-    processed = []
-    for v in mf_vectors:
-        if v is None:
-            processed.append(np.zeros(target_dim))
-        else:
-            if v.shape[0] < target_dim:
-                padded = np.zeros(target_dim)
-                padded[:v.shape[0]] = v
-                processed.append(padded)
-            elif v.shape[0] > target_dim:
-                processed.append(v[:target_dim])
-            else:
-                processed.append(v)
-    return np.vstack(processed)
-
-def assign_clusters(x: np.ndarray, centroids: np.ndarray) -> np.ndarray:
-    labels = []
-    for vec in x:
-        dists = [np.linalg.norm(vec - c) for c in centroids]
-        labels.append(np.argmin(dists))
-    return np.array(labels)
-
-def update_centroids(x: np.ndarray, labels: np.ndarray, k_clusters: int) -> np.ndarray:
-    centroids = []
-    for i in range(k_clusters):
-        if np.any(labels == i):
-            centroids.append(np.mean(x[labels == i], axis=0))
-        else:
-            centroids.append(x[np.random.randint(0, len(x))])
-    return np.vstack(centroids)
+            raise ValueError(f"Unknown mode: {self.mode}")

@@ -81,10 +81,28 @@ class TrainTestSplitter:
             train_idx = sample_indices(id_indices, self.train_ratio)
             test_idx = sample_indices(ood_indices, self.test_ratio)
         elif self.mode == 2:  # train = ID, test = ID + OOD
+            # Sample training data from ID
             train_idx = sample_indices(id_indices, self.train_ratio)
-            test_id_idx = sample_indices(id_indices.difference(train_idx), self.test_ratio)
-            test_ood_idx = sample_indices(ood_indices, self.test_ratio)
-            test_idx = test_id_idx.append(test_ood_idx)
+
+            # Remaining ID samples for test
+            remaining_id = id_indices.difference(train_idx)
+
+            # Determine equal number of ID and OOD for test
+            n_test_id = len(remaining_id)
+            n_test_ood = len(ood_indices)
+            n_equal = min(n_test_id, n_test_ood) // 2
+
+            # Sample exactly n_equal from both
+            if n_equal > 0:
+                test_id_idx = remaining_id.to_series().sample(
+                    n=n_equal, random_state=self.random_state
+                ).index
+                test_ood_idx = ood_indices.to_series().sample(
+                    n=n_equal, random_state=self.random_state
+                ).index
+                test_idx = test_id_idx.append(test_ood_idx)
+            else:
+                test_idx = pd.Index([])  # fallback if no samples
         elif self.mode == 3:  # train = ID + OOD, test = ID + OOD
             all_indices = id_indices.append(ood_indices)
             train_idx = sample_indices(all_indices, self.train_ratio)
