@@ -10,13 +10,32 @@ from sklearn.metrics import (
     mean_absolute_error,
     roc_auc_score,
     roc_curve,
-    f1_score
+    f1_score, precision_score, recall_score
 )
 from sklearn.preprocessing import normalize
 
 
 @dataclass
 class MetricsResult:
+    """
+    Container for evaluation results.
+
+    Attributes
+    ----------
+    id_metrics : Dict[str, float]
+        Predictive metrics computed on in-distribution (ID) samples only.
+
+    ood_metrics : Dict[str, float]
+        Predictive metrics computed on out-of-distribution (OOD) samples only.
+
+    global_metrics : Dict[str, float]
+        Metrics that require both ID and OOD samples, typically OOD detection metrics.
+        Example:
+        {
+            "auroc": float,
+            "fpr@95tpr": float
+        }
+    """
     id_metrics: Dict[str, float]
     ood_metrics: Dict[str, float]
     global_metrics: Dict[str, float]
@@ -24,33 +43,56 @@ class MetricsResult:
 
 class MetricsEvaluator:
     """
-    Computes predictive and OOD metrics.
-    All predictive metrics are reported separately for ID and OOD.
+    Evaluator for predictive performance and OOD detection.
+
+    This class separates evaluation into:
+    - ID performance (model behavior on in-distribution data),
+    - OOD performance (generalization to shifted data),
+    - global OOD detection metrics (quality of OOD scoring).
+
+    Notes
+    -----
+    - Predictive metrics are computed independently for ID and OOD subsets.
+    - OOD detection metrics assume availability of `ood_scores`.
+    - Convention: higher OOD score => more OOD-like sample.
     """
 
     def __init__(self, task: str = "classification"):
+        """
+        Initialize evaluator.
+
+        Parameters
+        ----------
+        task : {"classification", "regression"}, default="classification"
+            Type of prediction task.
+
+        Raises
+        ------
+        ValueError
+            If task is not supported.
+        """
         if task not in {"classification", "regression"}:
             raise ValueError("task must be 'classification' or 'regression'")
         self.task = task
 
     def evaluate(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        ood_mask: np.ndarray,
-        ood_scores: Optional[np.ndarray] = None,
+            self,
+            y_true: np.ndarray,
+            y_pred: np.ndarray,
+            ood_mask: np.ndarray,
+            ood_scores: Optional[np.ndarray] = None,
     ) -> MetricsResult:
         id_mask = ~ood_mask
 
-        id_metrics = self._predictive_metrics(
-            y_true[id_mask], y_pred[id_mask]
-        )
-        ood_metrics = self._predictive_metrics(
-            y_true[ood_mask], y_pred[ood_mask]
-        )
+        # Per-class probabilities for roc_auc — use raw ood_scores if 1-D
+        # (already 1 - max_prob from pipeline), otherwise pass None and skip.
+        id_scores = ood_scores[id_mask] if ood_scores is not None else None
+        ood_scores_ = ood_scores[ood_mask] if ood_scores is not None else None
+
+        id_metrics = self._predictive_metrics(y_true[id_mask], y_pred[id_mask], id_scores)
+        ood_metrics = self._predictive_metrics(y_true[ood_mask], y_pred[ood_mask], ood_scores_)
 
         global_metrics: Dict[str, float] = {}
-
         if ood_scores is not None:
             global_metrics["auroc"] = auroc(
                 id_scores=ood_scores[id_mask],
@@ -69,22 +111,34 @@ class MetricsEvaluator:
         )
 
     def _predictive_metrics(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
+            self,
+            y_true: np.ndarray,
+            y_pred: np.ndarray,
+            y_scores: Optional[np.ndarray] = None,
     ) -> Dict[str, float]:
         if y_true.size == 0:
             return {}
 
         if self.task == "classification":
-            return {
+            metrics = {
                 "accuracy": accuracy_score(y_true, y_pred),
+                "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+                "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+                "recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
             }
+            if y_scores is not None:
+                try:
+                    metrics["roc_auc"] = roc_auc_score(
+                        y_true, y_scores,
+                        multi_class="ovr",
+                        average="weighted",
+                    )
+                except ValueError:
+                    pass  # single class in subset → skip
+            return metrics
         else:
             return {
-                "rmse": mean_squared_error(
-                    y_true, y_pred, squared=False
-                ),
+                "rmse": mean_squared_error(y_true, y_pred, squared=False),
                 "mae": mean_absolute_error(y_true, y_pred),
             }
 
@@ -114,10 +168,6 @@ def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 # =========================
 
 def auroc(id_scores: np.ndarray, ood_scores: np.ndarray) -> float:
-    """
-    AUROC for OOD detection.
-    Convention: higher score => more OOD-like.
-    """
     y_true = np.concatenate(
         [np.zeros(len(id_scores)), np.ones(len(ood_scores))]
     )
@@ -130,9 +180,6 @@ def fpr_at_tpr(
     ood_scores: np.ndarray,
     tpr_level: float = 0.95,
 ) -> float:
-    """
-    False Positive Rate at a given True Positive Rate.
-    """
     y_true = np.concatenate(
         [np.zeros(len(id_scores)), np.ones(len(ood_scores))]
     )
