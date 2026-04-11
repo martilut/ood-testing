@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from oodt.data.base import BaseTabularDataset
+from oodt.data.preprocessing import Preprocessor
 from oodt.metrics.metrics import MetricsEvaluator, MetricsResult
 from oodt.shifts.base import BaseShiftStrategy
 from oodt.utils.utils import get_partition_indices
@@ -137,12 +138,14 @@ class OODPipeline:
         splitter,
         metrics: MetricsEvaluator,
         mode: Literal["unknown_ood", "known_ood"] = "unknown_ood",
+        preprocessor: Preprocessor | None = None,
     ):
         self.model = model
         self.shift_strategy = shift_strategy
         self.splitter = splitter
         self.metrics = metrics
         self.mode = mode
+        self.preprocessor = preprocessor
 
     # ----------------------------------------------------------
     # Public entry point
@@ -187,6 +190,10 @@ class OODPipeline:
             meta["train_partitions"] = partitions
         else:
             raise ValueError(f"Unknown pipeline mode: {self.mode}")
+
+        if self.preprocessor is not None:
+            X_train = self.preprocessor.fit_transform(X_train)
+            X_test = self.preprocessor.transform(X_test)
 
         self._attach_shift_meta(meta, X_test)
         self.model.fit(X_train, y_train)
@@ -246,6 +253,15 @@ class OODPipeline:
             # Fresh model per fold
             import copy
             fold_model = copy.deepcopy(self.model)
+
+            if self.preprocessor is not None:
+                fold_pre = copy.deepcopy(self.preprocessor)
+                X_train = fold_pre.fit_transform(X_train)
+                X_val = fold_pre.transform(X_val)
+                if is_tvt:
+                    X_test = fold_pre.transform(X_test)
+                meta["preprocessor"] = fold_pre
+
             fold_model.fit(X_train, y_train)
 
             # Evaluate on val
