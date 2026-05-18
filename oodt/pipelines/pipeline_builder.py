@@ -1,5 +1,8 @@
+from __future__ import annotations
+
+import copy
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -97,6 +100,7 @@ def _aggregate_metrics(
     """
     subsets = ("id_metrics", "ood_metrics", "global_metrics")
     means, stds = {}, {}
+    ddof = min(1, len(fold_metrics) - 1)
 
     for subset in subsets:
         all_dicts = [getattr(r, subset) for r in fold_metrics]
@@ -106,7 +110,7 @@ def _aggregate_metrics(
             for k in keys
         }
         stds[subset] = {
-            k: float(np.std([d[k] for d in all_dicts], ddof=1))
+            k: float(np.std([d[k] for d in all_dicts], ddof=ddof))
             for k in keys
         }
 
@@ -127,8 +131,7 @@ class OODPipeline:
     End-to-end pipeline for OOD-aware evaluation on tabular data.
 
     Supports both TrainTestSplitter (returns PipelineResult) and
-    KFoldSplitter (returns CVPipelineResult).  All other behaviour
-    is unchanged.
+    KFoldSplitter (returns CVPipelineResult).
     """
 
     def __init__(
@@ -138,7 +141,7 @@ class OODPipeline:
         splitter,
         metrics: MetricsEvaluator,
         mode: Literal["unknown_ood", "known_ood"] = "unknown_ood",
-        preprocessor: Preprocessor | None = None,
+        preprocessor: Optional[Preprocessor] = None,
     ):
         self.model = model
         self.shift_strategy = shift_strategy
@@ -197,7 +200,7 @@ class OODPipeline:
 
         self._attach_shift_meta(meta, X_test)
         self.model.fit(X_train, y_train)
-        metrics_result = self._evaluate(X_test, y_test, meta)
+        metrics_result = self._evaluate(X_test, y_test, meta, ood_key="test_ood_indices")
 
         return PipelineResult(
             X_train=X_train, y_train=y_train,
@@ -223,7 +226,6 @@ class OODPipeline:
                 )
             self.splitter.partitions = get_partition_indices(dataset.ood_target)
             X, y = dataset.data, dataset.target
-            partitions = None
         else:
             raise ValueError(f"Unknown pipeline mode: {self.mode}")
 
@@ -250,8 +252,6 @@ class OODPipeline:
 
             self._attach_shift_meta(meta, X_val)
 
-            # Fresh model per fold
-            import copy
             fold_model = copy.deepcopy(self.model)
 
             if self.preprocessor is not None:
@@ -360,7 +360,8 @@ class OODPipeline:
             probs = model.predict_proba(X_eval)
             ood_scores = 1.0 - np.max(probs, axis=1)
         elif hasattr(model, "decision_function"):
-            ood_scores = model.decision_function(X_eval).astype(float)
+            raw = model.decision_function(X_eval).astype(float)
+            ood_scores = -raw
 
         return self.metrics.evaluate(
             y_true=y_eval.to_numpy(),

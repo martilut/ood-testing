@@ -215,7 +215,7 @@ class MFKMeansShift(BaseShiftStrategy):
                         else:
                             # fallback: no bins at all, use zeros
                             mf_vec = np.zeros(self.expected_len)
-                            sample_matrix.append(mf_vec)
+                            sample_matrix.append(np.asarray(mf_vec).reshape(-1))
                             continue
 
                     mf_vec = partition_mf_[f_idx][bin_id]
@@ -226,11 +226,11 @@ class MFKMeansShift(BaseShiftStrategy):
                         padded[:len(mf_vec)] = mf_vec
                         mf_vec = padded
 
-                    sample_matrix.append(mf_vec)
+                    sample_matrix.append(np.asarray(mf_vec).reshape(-1))
 
                 projected.append(np.vstack(sample_matrix))
 
-            return projected
+            return [np.concatenate(s).astype(np.float32) for s in projected]
 
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
