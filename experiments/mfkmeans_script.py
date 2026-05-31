@@ -20,7 +20,7 @@ mf_names = ["mean", "sd", "eigenvalues", "mut_inf", "attr_ent"]
 clusters_list = [3]
 modes = ["vector", "matrix"]
 
-results_dir = Path(get_project_path()) / "experiment_results"
+results_dir = Path(get_project_path()) / "experiment_plotting"
 results_dir.mkdir(exist_ok=True, parents=True)
 
 summary_records = []

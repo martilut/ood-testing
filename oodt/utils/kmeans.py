@@ -126,17 +126,24 @@ def stratify_features_with_edges(x: np.ndarray, n_bins: int):
     return np.vstack(bins_matrix).T, partitions, bin_edges
 
 
-def build_metafeature_space_matrix(x, y, mf_name, n_bins, summary):
+def build_metafeature_space_matrix(x, y, mf_name, n_bins, summary, include_sample_features: bool = True):
     """
     Build metafeature matrices for training samples.
     Ensures all MF vectors have consistent length and handles empty partitions.
 
+    If `include_sample_features` is True (default), each row of the per-sample
+    matrix is augmented with the sample's own feature value(s) so the
+    representation contains both neighborhood metafeatures AND raw features.
+
+    Per-sample matrix layout (matrix mode):
+        row f_idx = [ mf_vec(partition of f_idx)  |  sample[f_idx] ]
+
     Returns:
-        sample_matrices: list of np.ndarray (per sample)
+        sample_matrices: list of np.ndarray (per sample), shape (n_features, expected_len[+1])
         bins: bin indices per feature
-        partitions: dict of partition MF vectors
+        partitions: dict of partition MF vectors (NOT augmented; raw MF only)
         bin_edges: edges used for digitization
-        expected_len: length of each MF vector
+        expected_len: length of each augmented row in the per-sample matrix
     """
 
     # Step 1: stratify features into bins
@@ -152,18 +159,21 @@ def build_metafeature_space_matrix(x, y, mf_name, n_bins, summary):
                 mf_vec = np.zeros(1)  # placeholder; will fix length later
             partitions[f_idx][b] = mf_vec
 
-    # Step 3: determine expected MF length
+    # Step 3: determine expected MF length (raw, before augmentation)
     all_vecs = [v for f in partitions for v in partitions[f].values()]
-    expected_len = max(len(v) for v in all_vecs)
+    mf_len = max(len(v) for v in all_vecs)
 
-    # Step 4: pad all partition vectors to expected_len
+    # Step 4: pad all partition vectors to mf_len
     for f_idx in partitions:
         for b in partitions[f_idx]:
             vec = partitions[f_idx][b]
-            if len(vec) != expected_len:
-                padded = np.zeros(expected_len)
+            if len(vec) != mf_len:
+                padded = np.zeros(mf_len)
                 padded[:len(vec)] = vec
                 partitions[f_idx][b] = padded
+
+    # Augmented row length: mf_len + 1 (sample's own feature value) if enabled
+    expected_len = mf_len + 1 if include_sample_features else mf_len
 
     # Step 5: build MF matrix per sample
     sample_matrices = []
@@ -173,8 +183,16 @@ def build_metafeature_space_matrix(x, y, mf_name, n_bins, summary):
         matrix = []
 
         for f_idx, bin_id in enumerate(sample_bins):
-            mf_vec = partitions[f_idx].get(bin_id, np.zeros(expected_len))
-            matrix.append(mf_vec)
+            mf_vec = partitions[f_idx].get(bin_id, np.zeros(mf_len))
+
+            if include_sample_features:
+                # append the sample's own value for this feature
+                row = np.concatenate([np.asarray(mf_vec).reshape(-1),
+                                      np.array([x[i, f_idx]], dtype=float)])
+            else:
+                row = np.asarray(mf_vec).reshape(-1)
+
+            matrix.append(row)
 
         sample_matrices.append(np.vstack(matrix))
 

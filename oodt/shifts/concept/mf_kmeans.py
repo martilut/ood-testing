@@ -16,6 +16,9 @@ class MFKMeansShift(BaseShiftStrategy):
       - vector mode (local neighborhoods)
       - matrix mode (feature-bin stratification)
 
+    Matrix mode can optionally augment each per-feature row with the sample's
+    own raw feature value (set `include_sample_features=True`, default).
+
     Also supports:
       - projection of unseen test samples into MF space
         via project_samples()
@@ -32,8 +35,9 @@ class MFKMeansShift(BaseShiftStrategy):
         max_iter: int = 50,
         patience: int = 5,
         verbose: bool = True,
-        mode: str = "vector",      # "vector" or "matrix"
-        metric: str = "frobenius", # matrix distance metric
+        mode: str = "vector",                # "vector" or "matrix"
+        metric: str = "frobenius",           # matrix distance metric
+        include_sample_features: bool = True,  # matrix mode: append sample's own features
     ):
         super().__init__(
             name="MFKMeansShift",
@@ -49,6 +53,7 @@ class MFKMeansShift(BaseShiftStrategy):
 
         self.mode = mode
         self.metric = metric
+        self.include_sample_features = include_sample_features
 
         self.max_iter = max_iter
         self.patience = patience
@@ -57,6 +62,8 @@ class MFKMeansShift(BaseShiftStrategy):
         # learned centroids
         self.centroids = None
         self.expected_len = None
+        # raw MF vector length (before augmentation with sample features)
+        self.mf_len_ = None
 
         # training reference data (needed for projection)
         self.X_ref_ = None
@@ -99,6 +106,7 @@ class MFKMeansShift(BaseShiftStrategy):
             "percent": self.percent,
             "n_bins": self.n_bins,
             "metric": self.metric,
+            "include_sample_features": self.include_sample_features,
         }
 
         # =====================================================
@@ -126,8 +134,11 @@ class MFKMeansShift(BaseShiftStrategy):
                 mf_name=self.mf_name,
                 n_bins=self.n_bins,
                 summary=self.summary,
+                include_sample_features=self.include_sample_features,
             )
             self.expected_len = expected_len
+            # raw MF length without the appended sample feature value
+            self.mf_len_ = expected_len - 1 if self.include_sample_features else expected_len
 
             init_ids = rng.choice(len(mf_space), self.n_partitions, replace=False)
             self.centroids = [mf_space[i] for i in init_ids]
@@ -184,7 +195,7 @@ class MFKMeansShift(BaseShiftStrategy):
     # Project unseen samples into MF space
     # ============================================================
 
-    def project_samples(self, X_new: pd.DataFrame) -> list[np.ndarray]:
+    def project_samples(self, X_new: pd.DataFrame):
         if self.mode == "vector":
             # vector mode stays the same
             return build_metafeature_space(
@@ -198,10 +209,15 @@ class MFKMeansShift(BaseShiftStrategy):
         elif self.mode == "matrix":
             projected = []
 
-            # compute bin indices for new samples
-            bins_array = stratify_features_with_edges(X_new.to_numpy(), self.n_bins)[0]
+            X_new_np = X_new.to_numpy()
 
-            for i, sample in enumerate(X_new.to_numpy()):
+            # compute bin indices for new samples
+            bins_array = stratify_features_with_edges(X_new_np, self.n_bins)[0]
+
+            # raw MF length (without sample-feature augmentation)
+            mf_len = self.mf_len_ if self.mf_len_ is not None else self.expected_len
+
+            for i, sample in enumerate(X_new_np):
                 sample_matrix = []
 
                 for f_idx, bin_id in enumerate(bins_array[i]):
@@ -212,25 +228,33 @@ class MFKMeansShift(BaseShiftStrategy):
                         available_bins = np.array(list(partition_mf_[f_idx].keys()))
                         if len(available_bins) > 0:
                             bin_id = available_bins[np.argmin(np.abs(available_bins - bin_id))]
+                            mf_vec = partition_mf_[f_idx][bin_id]
                         else:
                             # fallback: no bins at all, use zeros
-                            mf_vec = np.zeros(self.expected_len)
-                            sample_matrix.append(np.asarray(mf_vec).reshape(-1))
-                            continue
+                            mf_vec = np.zeros(mf_len)
+                    else:
+                        mf_vec = partition_mf_[f_idx][bin_id]
 
-                    mf_vec = partition_mf_[f_idx][bin_id]
-
-                    # ensure correct length
-                    if len(mf_vec) != self.expected_len:
-                        padded = np.zeros(self.expected_len)
+                    # ensure correct raw MF length
+                    if len(mf_vec) != mf_len:
+                        padded = np.zeros(mf_len)
                         padded[:len(mf_vec)] = mf_vec
                         mf_vec = padded
 
-                    sample_matrix.append(np.asarray(mf_vec).reshape(-1))
+                    if self.include_sample_features:
+                        row = np.concatenate([np.asarray(mf_vec).reshape(-1),
+                                              np.array([sample[f_idx]], dtype=float)])
+                    else:
+                        row = np.asarray(mf_vec).reshape(-1)
+
+                    sample_matrix.append(row)
 
                 projected.append(np.vstack(sample_matrix))
 
-            return [np.concatenate(s).astype(np.float32) for s in projected]
+            # Return list of 2D matrices (consistent with training MF space layout).
+            # This is what plot_mf_space and the OOD detector expect — each element
+            # can be flattened independently.
+            return projected
 
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
