@@ -1,4 +1,27 @@
-import itertools
+"""
+mfkmeans_script.py — compares MF-KMeans variants on partition datasets.
+
+Variants compared (NEW):
+    1. raw_kmeans       — plain KMeans on raw source features (no MF)
+    2. mf_single_<mf>   — MF-KMeans with a SINGLE metafeature + source features
+                          (original behaviour; one entry per name in `mf_names`)
+    3. mf_multi_all     — MF-KMeans with the FULL LIST of metafeatures
+                          + source features
+
+Layout for results:
+    results_dir / dataset_name / <variant_name> / clusters_<k> / <mode>
+
+Notes
+-----
+- `raw_kmeans` is independent of `mode` (no MF space is built); it is run
+  once per cluster count and saved under mode="none".
+- All variants share the same splitter and metrics so the resulting
+  `summary_metrics.csv` is directly comparable across variants.
+- MF-DBSCAN / MF-Hierarchical are NOT included here because their cluster
+  count is data-dependent and cannot guarantee the `n_partitions` required
+  by `OODPipeline`'s splitter. They are only used in `detection.py`.
+"""
+
 from pathlib import Path
 
 import pandas as pd
@@ -8,6 +31,7 @@ from oodt.data.loaders import CSVDataset
 from oodt.metrics.metrics import MetricsEvaluator
 from oodt.pipelines.pipeline_builder import OODPipeline
 from oodt.shifts.concept.mf_kmeans import MFKMeansShift
+from oodt.shifts.concept.raw_kmeans import RawKMeansShift
 from oodt.splitting.splitter import TrainTestSplitter
 from oodt.utils.plotting import plot_mf_space, compute_distance_stats
 from oodt.utils.utils import get_project_path
@@ -20,10 +44,67 @@ mf_names = ["mean", "sd", "eigenvalues", "mut_inf", "attr_ent"]
 clusters_list = [3]
 modes = ["vector", "matrix"]
 
-results_dir = Path(get_project_path()) / "experiment_results"
+results_dir = Path(get_project_path()) / "experiment_multiple"
 results_dir.mkdir(exist_ok=True, parents=True)
 
 summary_records = []
+
+
+# =========================
+# Build variant grid
+# =========================
+
+def build_variants(mf_names, clusters_list, modes):
+    """
+    Yield (variant_name, mf_list_or_None, n_clusters, mode) tuples.
+
+    - variant_name == "raw_kmeans" with mode == "none" -> RawKMeansShift
+    - variant_name == "mf_single_<mf>" -> MFKMeansShift(mf_name=[<mf>])
+    - variant_name == "mf_multi_all"   -> MFKMeansShift(mf_name=mf_names)
+    """
+    for n_clusters in clusters_list:
+        # # 1) Plain KMeans on raw features (no MF, no mode)
+        # yield ("raw_kmeans", None, n_clusters, "none")
+        #
+        # # 2) MF-KMeans with a single metafeature  (original behaviour)
+        # for mf in mf_names:
+        #     for mode in modes:
+        #         yield (f"mf_single_{mf}", [mf], n_clusters, mode)
+
+        # 3) MF-KMeans with the full list of metafeatures
+        for mode in modes:
+            yield ("mf_multi_all", list(mf_names), n_clusters, mode)
+
+
+def build_shift(variant_name, mf_list, n_clusters, mode):
+    """Instantiate the shift strategy for a given variant tuple."""
+    if variant_name == "raw_kmeans":
+        return RawKMeansShift(
+            n_partitions=n_clusters,
+            random_state=42,
+        )
+
+    if mode == "vector":
+        return MFKMeansShift(
+            mf_name=mf_list,
+            n_partitions=n_clusters,
+            random_state=42,
+            mode="vector",
+        )
+
+    # matrix
+    return MFKMeansShift(
+        mf_name=mf_list,
+        n_partitions=n_clusters,
+        random_state=42,
+        mode="matrix",
+        n_bins=100,
+    )
+
+
+# =========================
+# Main loop
+# =========================
 
 for dataset_folder in datasets_dir.iterdir():
     if not dataset_folder.is_dir():
@@ -51,35 +132,35 @@ for dataset_folder in datasets_dir.iterdir():
     dataset.load()
 
     # Loop through configurations
-    for mf_name, n_clusters, mode in itertools.product(mf_names, clusters_list, modes):
-        save_dir = results_dir / dataset_name / mf_name / f"clusters_{n_clusters}" / mode
+    for variant_name, mf_list, n_clusters, mode in build_variants(
+        mf_names, clusters_list, modes
+    ):
+        save_dir = (
+            results_dir
+            / dataset_name
+            / variant_name
+            / f"clusters_{n_clusters}"
+            / mode
+        )
         plot_path = save_dir / "plot.png"
         stats_path = save_dir / "stats.csv"
         metrics_path = save_dir / "metrics.csv"
 
         # Skip if results already exist
         if plot_path.exists() and stats_path.exists() and metrics_path.exists():
-            print(f"\n-- Skipping existing experiment: MF={mf_name}, clusters={n_clusters}, mode={mode}")
+            print(
+                f"\n-- Skipping existing experiment: variant={variant_name}, "
+                f"clusters={n_clusters}, mode={mode}"
+            )
             continue
 
-        print(f"\n-- Running experiment: MF={mf_name}, clusters={n_clusters}, mode={mode} --")
+        print(
+            f"\n-- Running experiment: variant={variant_name}, "
+            f"clusters={n_clusters}, mode={mode} --"
+        )
 
         # Initialize shift strategy
-        if mode == "vector":
-            shift_strategy = MFKMeansShift(
-                mf_name=[mf_name],
-                n_partitions=n_clusters,
-                random_state=42,
-                mode="vector",
-            )
-        else:
-            shift_strategy = MFKMeansShift(
-                mf_name=[mf_name],
-                n_partitions=n_clusters,
-                random_state=42,
-                mode="matrix",
-                n_bins=100,
-            )
+        shift_strategy = build_shift(variant_name, mf_list, n_clusters, mode)
 
         # Initialize splitter
         splitter = TrainTestSplitter(
@@ -103,7 +184,7 @@ for dataset_folder in datasets_dir.iterdir():
             shift_strategy=shift_strategy,
             splitter=splitter,
             metrics=metrics,
-            mode="known_ood"
+            mode="known_ood",
         )
 
         # Run pipeline
@@ -150,9 +231,10 @@ for dataset_folder in datasets_dir.iterdir():
         # =========================
         metrics_dict.update({
             "dataset": dataset_name,
-            "mf_name": mf_name,
+            "variant": variant_name,
+            "mf_list": ",".join(mf_list) if mf_list else "",
             "n_clusters": n_clusters,
-            "mode": mode
+            "mode": mode,
         })
         summary_records.append(metrics_dict)
 

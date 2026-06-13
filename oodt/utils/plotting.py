@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,9 +22,38 @@ def _incremental_pca_transform(matrices, pca: IncrementalPCA, batch_size: int) -
     return result_2d
 
 
-def _save_blank_plot(title: str, path):
+def _fit_incremental_pca(matrices, batch_size: int, jitter_scale: float = 1e-10):
+    """Fit an IncrementalPCA(n_components=2) on a list of matrices. Returns (pca, n_batches_fitted)."""
+    effective_batch = max(batch_size, 2)
+    rng = np.random.default_rng(42)
+
+    pca = IncrementalPCA(n_components=2)
+    batches_fitted = 0
+
+    n = len(matrices)
+    for start in range(0, n, effective_batch):
+        end = min(start + effective_batch, n)
+        batch = np.array([m.flatten() for m in matrices[start:end]], dtype=np.float64)
+
+        if np.allclose(batch, batch[0]):
+            continue
+
+        batch += rng.normal(0.0, jitter_scale, batch.shape)
+
+        try:
+            pca.partial_fit(batch)
+            batches_fitted += 1
+        except np.linalg.LinAlgError as e:
+            print(f"  [WARNING] SVD did not converge for batch [{start}:{end}], skipping. ({e})")
+
+    return pca, batches_fitted, effective_batch
+
+
+def _save_blank_plot(title: str, path, n_axes: int = 2):
     """Save an empty placeholder plot when PCA cannot be fitted."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig, axes = plt.subplots(1, n_axes, figsize=(7 * n_axes, 6))
+    if n_axes == 1:
+        axes = [axes]
     for ax in axes:
         ax.text(
             0.5, 0.5,
@@ -55,17 +84,6 @@ def plot_mf_space(
 ):
     """
     Plot the metafeature space using IncrementalPCA to keep memory usage low.
-
-    Parameters
-    ----------
-    result        : pipeline result object
-    reduction     : ignored (always PCA), kept for API compatibility
-    title         : plot title
-    path          : save path; if None the plot is shown interactively
-    batch_size    : samples flattened at once — lower = less peak RAM, more CPU.
-                    Must be >= 2 (n_components).
-    jitter_scale  : std of Gaussian noise added before SVD to break degeneracy.
-                    Negligible effect on PCA geometry.
     """
     meta = result.metadata
 
@@ -74,49 +92,16 @@ def plot_mf_space(
 
     n_train = len(mf_train)
 
-    # IncrementalPCA requires batch_size >= n_components (2)
-    effective_batch = max(batch_size, 2)
-
-    rng = np.random.default_rng(42)
-
-    # ----------------------------
-    # Fit IncrementalPCA on train
-    # ----------------------------
-    pca = IncrementalPCA(n_components=2)
-    batches_fitted = 0
-
-    for start in range(0, n_train, effective_batch):
-        end   = min(start + effective_batch, n_train)
-        batch = np.array([m.flatten() for m in mf_train[start:end]], dtype=np.float64)
-
-        # Skip batches where every row is identical — SVD diverges on them
-        if np.allclose(batch, batch[0]):
-            continue
-
-        # Tiny jitter breaks numerical near-degeneracy without shifting the geometry
-        batch += rng.normal(0.0, jitter_scale, batch.shape)
-
-        try:
-            pca.partial_fit(batch)
-            batches_fitted += 1
-        except np.linalg.LinAlgError as e:
-            print(f"  [WARNING] SVD did not converge for batch [{start}:{end}], skipping. ({e})")
+    pca, batches_fitted, effective_batch = _fit_incremental_pca(mf_train, batch_size, jitter_scale)
 
     if batches_fitted == 0:
-        # Every batch was degenerate — nothing to plot
         print("  [WARNING] PCA fit failed entirely — MF space is degenerate. Saving blank plot.")
         _save_blank_plot(title, path)
         return
 
-    # ----------------------------
-    # Transform train and test
-    # ----------------------------
     train_2d = _incremental_pca_transform(mf_train, pca, effective_batch)
     test_2d  = _incremental_pca_transform(mf_test,  pca, effective_batch)
 
-    # ----------------------------
-    # Partition labels / cluster ids
-    # ----------------------------
     train_labels = meta.get("train_partitions", meta.get("partitions", {}))
 
     train_cluster_ids = np.full(n_train, -1)
@@ -128,31 +113,19 @@ def plot_mf_space(
         local_positions = np.where(np.isin(train_index, valid_global))[0]
         train_cluster_ids[local_positions] = pid
 
-    # ----------------------------
-    # OOD mask for test samples
-    # ----------------------------
     ood_mask = result.X_test.index.isin(meta.get("test_ood_indices", []))
 
-    # ----------------------------
-    # Plot two horizontal subplots
-    # ----------------------------
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # ---- Left: train clusters colored ----
     scatter = axes[0].scatter(
-        train_2d[:, 0],
-        train_2d[:, 1],
-        c=train_cluster_ids,
-        cmap="tab20",
-        alpha=0.7,
-        s=10,
+        train_2d[:, 0], train_2d[:, 1],
+        c=train_cluster_ids, cmap="tab20", alpha=0.7, s=10,
     )
     axes[0].set_title("Train clusters")
     axes[0].grid(True)
     legend1 = axes[0].legend(*scatter.legend_elements(), title="Cluster")
     axes[0].add_artist(legend1)
 
-    # ---- Right: train gray, test ID orange, test OOD blue ----
     axes[1].scatter(train_2d[:, 0], train_2d[:, 1],
                     color="lightgray", alpha=0.6, s=10, label="Train")
     axes[1].scatter(test_2d[~ood_mask, 0], test_2d[~ood_mask, 1],
@@ -171,7 +144,158 @@ def plot_mf_space(
     else:
         plt.show()
 
-    plt.close(fig)  # release figure memory immediately
+    plt.close(fig)
+
+
+# ============================================================
+# Plot OOD classification correctness in MF space
+# ============================================================
+
+def plot_ood_classification(
+    mf_train,
+    mf_test,
+    ood_true: np.ndarray,
+    ood_pred: np.ndarray,
+    scores: Optional[np.ndarray] = None,
+    title: str = "OOD classification in MF space",
+    path: Optional[str] = None,
+    batch_size: int = 512,
+    jitter_scale: float = 1e-10,
+):
+    """
+    Project train + test MF representations into 2D via IncrementalPCA fitted on train,
+    then plot test points colored by classification correctness.
+
+    Categories:
+        - TN: ID samples correctly labelled ID  (green dot)
+        - TP: OOD samples correctly labelled OOD (blue dot)
+        - FP: ID samples wrongly labelled OOD   (red x)
+        - FN: OOD samples wrongly labelled ID   (orange x)
+
+    Three subplots:
+        1. Train MF space + true ID/OOD test overlay (ground truth view)
+        2. Train MF space + predicted ID/OOD test overlay (prediction view)
+        3. Correctness map (TP/TN/FP/FN)
+
+    Parameters
+    ----------
+    mf_train : list of np.ndarray
+        Training MF representations (each can be vector or 2D matrix).
+    mf_test : list of np.ndarray
+        Test MF representations, same format as mf_train.
+    ood_true : np.ndarray
+        Boolean / 0-1 array, True/1 if the test sample is from the target (OOD).
+    ood_pred : np.ndarray
+        Boolean / 0-1 array, True/1 if the detector predicted OOD.
+    scores : np.ndarray, optional
+        Continuous OOD scores. If provided, an additional 4th subplot shows them.
+    """
+    ood_true = np.asarray(ood_true).astype(bool)
+    ood_pred = np.asarray(ood_pred).astype(bool)
+
+    if len(ood_true) != len(mf_test) or len(ood_pred) != len(mf_test):
+        raise ValueError(
+            f"Length mismatch: mf_test={len(mf_test)}, ood_true={len(ood_true)}, "
+            f"ood_pred={len(ood_pred)}"
+        )
+
+    n_axes = 3 if scores is None else 4
+
+    pca, batches_fitted, effective_batch = _fit_incremental_pca(mf_train, batch_size, jitter_scale)
+
+    if batches_fitted == 0:
+        print("  [WARNING] PCA fit failed entirely — MF space is degenerate. Saving blank plot.")
+        _save_blank_plot(title, path, n_axes=n_axes)
+        return
+
+    train_2d = _incremental_pca_transform(mf_train, pca, effective_batch)
+    test_2d = _incremental_pca_transform(mf_test, pca, effective_batch)
+
+    # classification categories
+    tp = ood_true & ood_pred           # OOD predicted OOD
+    tn = (~ood_true) & (~ood_pred)     # ID predicted ID
+    fp = (~ood_true) & ood_pred        # ID predicted OOD
+    fn = ood_true & (~ood_pred)        # OOD predicted ID
+
+    fig, axes = plt.subplots(1, n_axes, figsize=(7 * n_axes, 6))
+
+    # ---- 1. Ground truth view ----
+    ax = axes[0]
+    ax.scatter(train_2d[:, 0], train_2d[:, 1],
+               color="lightgray", alpha=0.5, s=10, label="Train")
+    ax.scatter(test_2d[~ood_true, 0], test_2d[~ood_true, 1],
+               color="tab:orange", marker="o", s=25, alpha=0.85,
+               edgecolors="black", linewidths=0.3, label="Test ID (source)")
+    ax.scatter(test_2d[ood_true, 0], test_2d[ood_true, 1],
+               color="tab:blue", marker="o", s=25, alpha=0.85,
+               edgecolors="black", linewidths=0.3, label="Test OOD (target)")
+    ax.set_title("Ground truth (source vs target)")
+    ax.grid(True)
+    ax.legend(loc="best", fontsize=8)
+
+    # ---- 2. Prediction view ----
+    ax = axes[1]
+    ax.scatter(train_2d[:, 0], train_2d[:, 1],
+               color="lightgray", alpha=0.5, s=10, label="Train")
+    ax.scatter(test_2d[~ood_pred, 0], test_2d[~ood_pred, 1],
+               color="tab:orange", marker="o", s=25, alpha=0.85,
+               edgecolors="black", linewidths=0.3, label="Predicted ID")
+    ax.scatter(test_2d[ood_pred, 0], test_2d[ood_pred, 1],
+               color="tab:blue", marker="o", s=25, alpha=0.85,
+               edgecolors="black", linewidths=0.3, label="Predicted OOD")
+    ax.set_title("Predictions")
+    ax.grid(True)
+    ax.legend(loc="best", fontsize=8)
+
+    # ---- 3. Correctness map ----
+    ax = axes[2]
+    ax.scatter(train_2d[:, 0], train_2d[:, 1],
+               color="lightgray", alpha=0.4, s=10, label="Train")
+    if tn.any():
+        ax.scatter(test_2d[tn, 0], test_2d[tn, 1],
+                   color="tab:green", marker="o", s=28, alpha=0.85,
+                   edgecolors="black", linewidths=0.3,
+                   label=f"TN: ID→ID ({int(tn.sum())})")
+    if tp.any():
+        ax.scatter(test_2d[tp, 0], test_2d[tp, 1],
+                   color="tab:blue", marker="o", s=28, alpha=0.85,
+                   edgecolors="black", linewidths=0.3,
+                   label=f"TP: OOD→OOD ({int(tp.sum())})")
+    if fp.any():
+        ax.scatter(test_2d[fp, 0], test_2d[fp, 1],
+                   color="tab:red", marker="x", s=45, linewidths=1.5,
+                   label=f"FP: ID→OOD ({int(fp.sum())})")
+    if fn.any():
+        ax.scatter(test_2d[fn, 0], test_2d[fn, 1],
+                   color="tab:orange", marker="x", s=45, linewidths=1.5,
+                   label=f"FN: OOD→ID ({int(fn.sum())})")
+
+    acc = float((tp.sum() + tn.sum()) / max(1, len(ood_true)))
+    ax.set_title(f"Correctness (acc={acc:.3f})")
+    ax.grid(True)
+    ax.legend(loc="best", fontsize=8)
+
+    # ---- 4. Score map (optional) ----
+    if scores is not None:
+        ax = axes[3]
+        ax.scatter(train_2d[:, 0], train_2d[:, 1],
+                   color="lightgray", alpha=0.4, s=10)
+        sc = ax.scatter(test_2d[:, 0], test_2d[:, 1],
+                        c=np.asarray(scores), cmap="viridis",
+                        s=25, alpha=0.9, edgecolors="black", linewidths=0.3)
+        plt.colorbar(sc, ax=ax, label="OOD score")
+        ax.set_title("OOD scores")
+        ax.grid(True)
+
+    plt.suptitle(title)
+    plt.tight_layout()
+
+    if path is not None:
+        plt.savefig(path, dpi=110)
+    else:
+        plt.show()
+
+    plt.close(fig)
 
 
 # ============================================================
