@@ -15,7 +15,19 @@ def compute_metafeature(
     mf_name: Union[str, List[str]],
     summary: Optional[List[str]] = None,
 ) -> Optional[np.ndarray]:
+    """
+    Compute a metafeature vector for a sub-sample of data.
 
+    Behaviour
+    ---------
+    - **Single MF** (mf_name is a string or a single-element list):
+        Original behaviour preserved — returns the first metafeature value
+        wrapped as an array of length 1.
+    - **Multi MF** (mf_name is a list with len > 1):
+        Returns the FULL list of values returned by pymfe (one per
+        feature × summary combination), so all requested metafeatures
+        contribute to the MF representation.
+    """
     mfe = MFE(features=mf_name, summary=summary)
 
     try:
@@ -24,7 +36,31 @@ def compute_metafeature(
     except Exception:
         return None
 
-    if not ft_values or ft_values[0] is None:
+    if not ft_values:
+        return None
+
+    is_multi = isinstance(mf_name, (list, tuple)) and len(mf_name) > 1
+
+    if is_multi:
+        # Aggregate ALL values pymfe returned.
+        cleaned = []
+        for v in ft_values:
+            if v is None:
+                cleaned.append(0.0)
+            elif np.isscalar(v):
+                if isinstance(v, float) and np.isnan(v):
+                    cleaned.append(0.0)
+                else:
+                    cleaned.append(float(v))
+            else:
+                # array-like value — flatten it in
+                arr = np.asarray(v, dtype=float).flatten()
+                arr = np.where(np.isnan(arr), 0.0, arr)
+                cleaned.extend(arr.tolist())
+        return np.array(cleaned, dtype=float)
+
+    # ---- Single-MF: preserve original behaviour ----
+    if ft_values[0] is None:
         return None
 
     values = ft_values[0]
@@ -72,6 +108,20 @@ def build_metafeature_space(x, y, mf_name, percent, summary):
             mf_vec = np.zeros(1)
 
         vectors.append(mf_vec)
+
+    # In multi-MF mode the vectors may not all have the same length if some
+    # samples produced NaNs for different MFs — pad to max length.
+    max_len = max(len(v) for v in vectors)
+    if any(len(v) != max_len for v in vectors):
+        padded = []
+        for v in vectors:
+            if len(v) < max_len:
+                p = np.zeros(max_len)
+                p[:len(v)] = v
+                padded.append(p)
+            else:
+                padded.append(v)
+        vectors = padded
 
     return np.vstack(vectors)
 

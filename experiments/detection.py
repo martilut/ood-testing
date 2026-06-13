@@ -15,6 +15,8 @@ from oodt.detection.energy import EnergyOODDetector
 
 from oodt.detection.mf_kmeans_detector import MFKMeansOODDetector
 from oodt.shifts.concept.mf_kmeans import MFKMeansShift
+from oodt.shifts.concept.mf_dbscan import MFDBSCANShift
+from oodt.shifts.concept.mf_hierarchical import MFHierarchicalShift
 
 from oodt.utils.utils import get_project_path
 from oodt.utils.plotting import plot_ood_classification
@@ -26,7 +28,7 @@ from oodt.utils.plotting import plot_ood_classification
 
 PROJECT_ROOT = Path(get_project_path())
 DATASETS_ROOT = PROJECT_ROOT / "datasets" / "partitions"
-OUTPUT_ROOT = PROJECT_ROOT / "experiments" / "results" / "self"
+OUTPUT_ROOT = PROJECT_ROOT / "experiments" / "results" / "all"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 RANDOM_STATE = 42
@@ -35,6 +37,8 @@ RANDOM_STATE = 42
 # ==================================================
 # BASE DETECTORS
 # ==================================================
+# `kmeans` here is the plain-features KMeans baseline (no MF).
+# All MF-* detectors below operate in the metafeature space.
 
 base_detectors = {
     "knn_5": KNNOODDetector(k=5),
@@ -44,28 +48,48 @@ base_detectors = {
 
 
 # ==================================================
-# MF-KMEANS GRID
+# MF DETECTORS GRID
 # ==================================================
+# Three orthogonal axes of variation:
+#   * mf_combo  — single MF vs. full list of MFs
+#   * method    — clustering backbone (kmeans / dbscan / hierarchical)
+#   * k, mode   — partitions and MF-space mode (vector / matrix)
+#
+# All MF detectors reuse `MFKMeansOODDetector`, which is agnostic to the
+# specific shift class — it only relies on `centroids`, `project_samples`,
+# `get_partition_labels`, `get_meta_info`.
 
 mf_names = ["mean", "sd", "var", "eigenvalues", "mut_inf", "attr_ent"]
 clusters_list = [3]
 modes = ["matrix"]
 
+# MF combinations: each single MF + one combo of all MFs together
+mf_combos = {f"single_{mf}": [mf] for mf in mf_names}
+mf_combos["multi_all"] = list(mf_names)
+
+# Clustering backbones operating on the MF space
+clustering_methods = {
+    "kmeans": MFKMeansShift,
+    "dbscan": MFDBSCANShift,
+    "hier": MFHierarchicalShift,
+}
+
 mf_detectors = {}
 
-for mf, k, mode in product(mf_names, clusters_list, modes):
+for combo_name, mf_list in mf_combos.items():
+    for method_name, ShiftCls in clustering_methods.items():
+        for k, mode in product(clusters_list, modes):
 
-    shift = MFKMeansShift(
-        mf_name=[mf],
-        n_partitions=k,
-        mode=mode,
-        random_state=RANDOM_STATE,
-        include_sample_features=True,  # matrix mode: append sample's own features
-    )
+            shift = ShiftCls(
+                mf_name=mf_list,
+                n_partitions=k,
+                mode=mode,
+                random_state=RANDOM_STATE,
+                include_sample_features=True,
+            )
 
-    name = f"mf_kmeans_{mf}_k{k}_{mode}"
-
-    mf_detectors[name] = MFKMeansOODDetector(shift)
+            name = f"mf_{method_name}_{combo_name}_k{k}_{mode}"
+            mf_detectors[name] = MFKMeansOODDetector(shift)
 
 
 # ==================================================
@@ -74,7 +98,7 @@ for mf, k, mode in product(mf_names, clusters_list, modes):
 
 detectors = {
     **base_detectors,
-    **mf_detectors
+    **mf_detectors,
 }
 
 
@@ -124,7 +148,9 @@ def load_dataset_from_folder(folder: Path) -> CSVDataset:
 
 
 def build_ood_mask(dataset: CSVDataset) -> np.ndarray:
-    return dataset.ood_target != 0
+    # Force numpy bool so downstream positional / .iloc[] indexing is safe
+    # regardless of the underlying pandas Index of `dataset.ood_target`.
+    return np.asarray(dataset.ood_target != 0, dtype=bool)
 
 
 # ==================================================
@@ -226,9 +252,16 @@ def _single_split(X, y, ood_mask, id_ratio=0.5, train_frac=0.7, seed=RANDOM_STAT
 
 def run_diagnostic_plots(X, y, ood_mask, dataset_name, save_dir):
     """
-    Train each MF-KMeans detector once on a single split and plot the OOD
+    Train each MF detector once on a single split and plot the OOD
     classification correctness in MF space.
+
+    Iterates over `mf_detectors` so any new clustering backbone added to
+    that dict is automatically diagnosed here too.
     """
+    # Coerce to a plain numpy bool array — guarantees positional indexing
+    # works regardless of the source pandas Index.
+    ood_mask = np.asarray(ood_mask, dtype=bool)
+
     diag_dir = save_dir / "mf_diagnostics"
     diag_dir.mkdir(parents=True, exist_ok=True)
 
@@ -245,10 +278,18 @@ def run_diagnostic_plots(X, y, ood_mask, dataset_name, save_dir):
     X_test = prep.transform(X_test_raw)
 
     # use only ID samples for fitting (matches OODDetectionPipeline behaviour)
-    train_ood_mask = ood_mask[train_idx]
-    id_train_mask = ~train_ood_mask
-    X_train_id = X_train.iloc[id_train_mask] if hasattr(X_train, "iloc") else X_train[id_train_mask]
-    y_train_id = y_train_raw.iloc[id_train_mask] if hasattr(y_train_raw, "iloc") else y_train_raw[id_train_mask]
+    train_ood_mask = ood_mask[train_idx]            # numpy bool
+    id_train_mask = ~train_ood_mask                 # numpy bool
+
+    if hasattr(X_train, "iloc"):
+        X_train_id = X_train.iloc[id_train_mask]
+    else:
+        X_train_id = X_train[id_train_mask]
+
+    if hasattr(y_train_raw, "iloc"):
+        y_train_id = y_train_raw.iloc[id_train_mask]
+    else:
+        y_train_id = np.asarray(y_train_raw)[id_train_mask]
 
     if len(X_train_id) < 5 or len(X_test) < 2:
         print(f"  [diagnostic] skipping {dataset_name}: not enough samples")
@@ -317,11 +358,15 @@ for dataset_folder in sorted(DATASETS_ROOT.iterdir()):
 
         plot_dataset(df, name, out_dir)
 
+        # CV results are kept even if MF diagnostic plotting fails later.
+        all_results.append(df)
+
         # ----- MF diagnostic plots (single-split, per dataset) -----
         print(f"\n--- MF diagnostic plots for {name} ---")
-        run_diagnostic_plots(X, y, ood_mask, name, out_dir)
-
-        all_results.append(df)
+        try:
+            run_diagnostic_plots(X, y, ood_mask, name, out_dir)
+        except Exception as e:
+            print(f"[diagnostic ERROR] {name}: {e}")
 
     except Exception as e:
         print(f"[ERROR] {name}: {e}")
